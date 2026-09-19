@@ -95,6 +95,7 @@ extern void Mac_SetExtendedAddress(uint8_t *pAddr, instanceId_t instanceId);
 static void App_CounterTimerCallback(void *param);
 static void App_TransmitCounter(void);
 static void App_StartCounter(void);
+static void App_SetCounter(uint8_t value);
 
 /************************************************************************************
 *************************************************************************************
@@ -609,6 +610,16 @@ void AppThread(osaTaskParam_t argument)
             if (ev & gAppEvtCounterTimer_c)
             {
                 App_TransmitCounter();
+            }
+
+            if (ev & gAppEvtCounterSetTo0_c)
+            {
+                App_SetCounter(0);
+            }
+
+            if (ev & gAppEvtCounterSetTo2_c)
+            {
+                App_SetCounter(2);
             }
 
 #if gNvmTestActive_d  
@@ -1231,6 +1242,22 @@ static void App_TransmitCounter(void)
     Serial_PrintHex(interfaceId, &value, 1, gPrtHexNewLine_c);
 }
 
+/* Sets the counter to a given value, restarts the 4 s period and sends it right away */
+static void App_SetCounter(uint8_t value)
+{
+    mCounter = value % (mCounterMaxValue_c + 1);
+
+    /* Restart the interval so the next automatic value arrives a full 4 s later */
+    TMR_StopTimer(mCounterTimer_c);
+    TMR_StartIntervalTimer(mCounterTimer_c, mCounterIntervalMs_c, App_CounterTimerCallback, NULL);
+
+    Serial_Print(interfaceId, "Counter set to: ", gAllowToBlock_d);
+    Serial_PrintHex(interfaceId, &mCounter, 1, gPrtHexNewLine_c);
+
+    /* Send the new value immediately */
+    OSA_EventSet(mAppEvent, gAppEvtCounterTimer_c);
+}
+
 /******************************************************************************
 * The App_ReceiveUartData() function will check if it is time to send out an
 * MLME-Poll request in order to receive data from the coordinator. If its time,
@@ -1285,9 +1312,28 @@ static void App_HandleKeys
   key_event_t events  /*IN: Events from keyboard modul */
   )
 {
-#if gKBD_KeysCount_c > 0 
-    switch ( events ) 
-    { 
+#if gKBD_KeysCount_c > 0
+    /* Counter control with the two board switches, only while we are in the network.
+       Only pushbuttons 1 and 2 exist (gKBD_KeysCount_c is 2). */
+    if( gState == stateListen )
+    {
+        switch ( events )
+        {
+        case gKBD_EventSW2_c:  /* SW3 on the board: counter back to 0 */
+            OSA_EventSet(mAppEvent, gAppEvtCounterSetTo0_c);
+            return;
+
+        case gKBD_EventSW1_c:  /* SW4 on the board: counter to 2 */
+            OSA_EventSet(mAppEvent, gAppEvtCounterSetTo2_c);
+            return;
+
+        default:
+            break;
+        }
+    }
+
+    switch ( events )
+    {
     case gKBD_EventLongSW1_c:
         OSA_EventSet(mAppEvent, gAppEvtPressedRestoreNvmBut_c);
     case gKBD_EventLongSW2_c:

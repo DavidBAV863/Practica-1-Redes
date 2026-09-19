@@ -70,6 +70,10 @@
 #define mCounterIntervalMs_c           3000   /* increment every 4 s */
 #define mCounterMaxValue_c             3      /* counts 0..3 */
 
+/* Switch definitions for event */
+#define gAppEvtCounterSetTo0_c         (1 << 6)
+#define gAppEvtCounterSetTo2_c         (1 << 7)
+
 /************************************************************************************
 *************************************************************************************
 * Public type definitions
