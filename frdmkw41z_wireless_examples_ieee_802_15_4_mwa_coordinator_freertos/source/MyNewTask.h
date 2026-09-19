@@ -20,6 +20,7 @@
 #define gMyNewTaskEvent1_c (1 << 0)
 #define gMyNewTaskEvent2_c (1 << 1)
 #define gMyNewTaskEvent3_c (1 << 2)
+#define gMyNewTaskEvent4_c (1 << 3)
 
 #define gMyTaskPriority_c 3
 #define gMyTaskStackSize_c 400
@@ -27,6 +28,7 @@
 void MyTaskTimer_Start(void);
 void MyTaskTimer_Stop(void);
 void MyTask_Init(void);
+void MyTask_SetCounterLed(uint8_t counter);
 
 void My_Task(osaTaskParam_t argument);
 

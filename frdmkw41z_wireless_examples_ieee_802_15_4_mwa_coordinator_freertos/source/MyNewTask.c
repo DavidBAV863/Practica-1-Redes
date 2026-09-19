@@ -6,6 +6,10 @@
  */
 
 #include "MyNewTask.h"
+#include "SerialManager.h"
+
+/* Interface used by mwa_coordinator.c; reused here only for debug traces */
+extern uint8_t interfaceId;
 
 osaEventId_t mMyEvents;
 /* Global Variable to store our TimerID */
@@ -14,6 +18,8 @@ tmrTimerID_t myTimerID = gTmrInvalidTimerID_c;
 osaTaskId_t gMyTaskHandler_ID;
 /* Local variable to store the current state of the LEDs */
 static uint8_t ledsState = 0;
+/* Last counter value (0-3) received from the coordinator's data indication */
+static uint8_t receivedCounter = 0;
 
 static void myTaskTimerCallback(void *param);
 
@@ -59,6 +65,37 @@ void My_Task(osaTaskParam_t argument)
 			TurnOffLeds();
 			TMR_StopTimer(myTimerID);
 			break;
+		case gMyNewTaskEvent4_c: /* Event to show the received counter (0-3) on the LEDs */
+		{
+			/* Data typed on a UART terminal arrives as the ASCII digit ('0'-'3') */
+			uint8_t counter = receivedCounter;
+			if( counter >= '0' && counter <= '3' )
+			{
+				counter -= '0';
+			}
+//			Serial_Print(interfaceId, "[MyTask] gMyNewTaskEvent4_c received, counter=", gAllowToBlock_d);
+//			Serial_PrintDec(interfaceId, counter);
+//			Serial_Print(interfaceId, "\r\n", gAllowToBlock_d);
+			TurnOffLeds();
+			switch(counter){
+			case 0:
+				Led3On();
+				break;
+			case 1:
+				Led2On();
+				break;
+			case 2:
+				Led4On();
+				break;
+			case 3:
+				Led4On();
+				Led2On();
+				break;
+			default:
+				break;
+			}
+			break;
+		}
 		default:
 			break;
 		}
@@ -89,5 +126,12 @@ void MyTaskTimer_Stop(void)
 void MyTaskTimer_Start(void)
 {
 	OSA_EventSet(mMyEvents, gMyNewTaskEvent1_c);
+}
+
+/* Public function to display the received counter (0-3) on the LEDs */
+void MyTask_SetCounterLed(uint8_t counter)
+{
+	receivedCounter = counter;
+	OSA_EventSet(mMyEvents, gMyNewTaskEvent4_c);
 }
 

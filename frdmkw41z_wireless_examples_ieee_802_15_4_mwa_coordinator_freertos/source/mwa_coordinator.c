@@ -114,7 +114,8 @@ static anchor_t mMcpsNwkInputQueue;
 
 static const uint64_t mExtendedAddress = mMacExtendedAddress_c;
 static instanceId_t   macInstance;
-static uint8_t        interfaceId;
+/* Not static: MyNewTask.c also prints to this interface for LED debug traces */
+uint8_t               interfaceId;
 osaEventId_t          mAppEvent;
 
 /************************************************************************************
@@ -822,6 +823,33 @@ static void App_HandleMcpsInput(mcpsToNwkMessage_t *pMsgIn, uint8_t appInstance)
        or application layer when data has been received. We simply
        copy the received data to the UART. */
     Serial_SyncWrite( interfaceId,pMsgIn->msgData.dataInd.pMsdu, pMsgIn->msgData.dataInd.msduLength );
+
+    /* First payload byte holds the counter (0-3); let MyNewTask show it on the LEDs */
+    if( pMsgIn->msgData.dataInd.msduLength > 0 )
+    {
+        uint8_t *pData = pMsgIn->msgData.dataInd.pMsdu;
+        int16_t idx;
+        uint8_t counterChar = 0;
+
+        /* The typed message may include a prefix (e.g. "Counter: 2"); use the last digit typed */
+        for( idx = (int16_t)pMsgIn->msgData.dataInd.msduLength - 1; idx >= 0; idx-- )
+        {
+            if( pData[idx] >= '0' && pData[idx] <= '9' )
+            {
+                counterChar = pData[idx];
+                break;
+            }
+        }
+
+//        Serial_Print(interfaceId, "\r\n[Coordinator] Extracted counter digit: '", gAllowToBlock_d);
+//        Serial_SyncWrite(interfaceId, &counterChar, 1);
+//        Serial_Print(interfaceId, "'\r\n", gAllowToBlock_d);
+
+        if( counterChar != 0 )
+        {
+            MyTask_SetCounterLed(counterChar);
+        }
+    }
     break;
     
   default:
