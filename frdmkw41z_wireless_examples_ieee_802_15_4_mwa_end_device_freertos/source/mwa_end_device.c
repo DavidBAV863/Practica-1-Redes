@@ -91,6 +91,11 @@ resultType_t MLME_NWK_SapHandler (nwkMessage_t* pMsg, instanceId_t instanceId);
 resultType_t MCPS_NWK_SapHandler (mcpsToNwkMessage_t* pMsg, instanceId_t instanceId);
 extern void Mac_SetExtendedAddress(uint8_t *pAddr, instanceId_t instanceId);
 
+/* App function for timer  */
+static void App_CounterTimerCallback(void *param);
+static void App_TransmitCounter(void);
+static void App_StartCounter(void);
+
 /************************************************************************************
 *************************************************************************************
 * Private type definitions
@@ -159,6 +164,9 @@ NVM_RegisterDataSet(&maMyAddress,         1,   8, maMyAddress_ID_c, gNVM_Mirrore
 NVM_RegisterDataSet(&mAddrMode,           1,   sizeof(addrModeType_t), mAddrMode_ID_c, gNVM_MirroredInRam_c);
 #endif
 
+/* Variables for the timer */
+static tmrTimerID_t mCounterTimer_c = gTmrInvalidTimerID_c;
+static uint8_t      mCounter = 0;
 
 /************************************************************************************
 *************************************************************************************
@@ -301,6 +309,8 @@ void App_Idle_Task(uint32_t argument)
 *****************************************************************************/
 void App_init( void )
 {
+	mCounterTimer_c = TMR_AllocateTimer();
+
     mAppEvent = OSA_EventCreate(TRUE);
     /* The initial application state */
     gState = stateInit;
@@ -442,6 +452,8 @@ void AppThread(osaTaskParam_t argument)
                 Serial_Print(interfaceId, "End device address restored from NVM: 0x", gAllowToBlock_d);
                 Serial_PrintHex(interfaceId, maMyAddress, mAddrMode == gAddrModeShortAddress_c ? 2 : 8, gPrtHexNoFormat_c);
                 Serial_Print(interfaceId, "\n\r\n\r", gAllowToBlock_d);
+                /* Start sending the counter to the coordinator */
+                App_StartCounter();
                 /* Startup the timer */
                 TMR_StartLowPowerTimer(mTimer_c, gTmrSingleShotTimer_c ,mPollInterval, AppPollWaitTimeout, NULL );
                 gState = stateListen;
@@ -549,6 +561,9 @@ void AppThread(osaTaskParam_t argument)
                             NvSaveOnIdle(&maMyAddress, TRUE);
                             NvSaveOnIdle(&mAddrMode, TRUE);
 #endif 
+                            /* Start sending the counter to the coordinator */
+                            App_StartCounter();
+
                             /* Startup the timer */
                             TMR_StartLowPowerTimer(mTimer_c, gTmrSingleShotTimer_c ,mPollInterval, AppPollWaitTimeout, NULL );
                             /* Go to the listen state */
@@ -590,6 +605,12 @@ void AppThread(osaTaskParam_t argument)
                 /* get byte from UART */
                 App_TransmitUartData();
             }
+
+            if (ev & gAppEvtCounterTimer_c)
+            {
+                App_TransmitCounter();
+            }
+
 #if gNvmTestActive_d  
             if (timeoutCounter >= mDefaultValueOfTimeoutError_c)
             {
@@ -1117,6 +1138,97 @@ static void App_TransmitUartData(void)
     {
         OSA_EventSet(mAppEvent, gAppEvtRxFromUart_c);
     }
+}
+
+/*****************************************
+ * Timer functions
+ *
+ ******************************************/
+
+/* Resets the counter and starts the 4 s timer; the first value (0) is sent right away */
+static void App_StartCounter(void)
+{
+    mCounter = 0;
+    TMR_StartIntervalTimer(mCounterTimer_c, mCounterIntervalMs_c, App_CounterTimerCallback, NULL);
+    OSA_EventSet(mAppEvent, gAppEvtCounterTimer_c);
+}
+
+static void App_CounterTimerCallback(void *param)
+{
+    (void)param;
+    OSA_EventSet(mAppEvent, gAppEvtCounterTimer_c);
+}
+
+/* Builds an MCPS-DATA.request carrying the counter and sends it to the coordinator */
+static void App_TransmitCounter(void)
+{
+    static const uint8_t prefix[] = "Counter: ";
+    nwkToMcpsMessage_t *pPacket;
+    uint8_t *pPayload;
+    uint8_t len = sizeof(prefix) - 1;
+    uint8_t value = mCounter;
+
+    /* Advance the counter every tick, 0..3 */
+    mCounter = (mCounter + 1) % (mCounterMaxValue_c + 1);
+
+    /* Don't queue more than the MAC allows; skip this sample if busy */
+    if( mcPendingPackets >= mDefaultValueOfMaxPendingDataPackets_c )
+    {
+        return;
+    }
+
+    pPacket = MSG_Alloc(sizeof(nwkToMcpsMessage_t) + 16);
+    if( pPacket == NULL )
+    {
+        return;
+    }
+
+    /* Payload lives right after the message struct, same as App_TransmitUartData */
+    pPacket->msgType = gMcpsDataReq_c;
+    pPacket->msgData.dataReq.pMsdu = (uint8_t*)(&pPacket->msgData.dataReq.pMsdu) +
+                                     sizeof(pPacket->msgData.dataReq.pMsdu);
+    pPayload = pPacket->msgData.dataReq.pMsdu;
+
+    FLib_MemCpy(pPayload, (void*)prefix, len);
+    pPayload[len++] = '0' + value;
+    pPayload[len++] = '\n';
+    pPayload[len++] = '\r';
+
+    /* MAC header: from us to the coordinator we associated with */
+    FLib_MemCpy(&pPacket->msgData.dataReq.dstAddr,  &mCoordInfo.coordAddress, 8);
+    FLib_MemCpy(&pPacket->msgData.dataReq.srcAddr,  &maMyAddress, 8);
+    FLib_MemCpy(&pPacket->msgData.dataReq.dstPanId, &mCoordInfo.coordPanId, 2);
+    FLib_MemCpy(&pPacket->msgData.dataReq.srcPanId, &mCoordInfo.coordPanId, 2);
+    pPacket->msgData.dataReq.dstAddrMode   = mCoordInfo.coordAddrMode;
+    pPacket->msgData.dataReq.srcAddrMode   = mAddrMode;
+    pPacket->msgData.dataReq.msduLength    = len;
+    pPacket->msgData.dataReq.txOptions     = gMacTxOptionsAck_c;   /* direct, with MAC ACK */
+    pPacket->msgData.dataReq.msduHandle    = mMsduHandle++;
+    pPacket->msgData.dataReq.securityLevel = gMacSecurityNone_c;
+
+    (void)NWK_MCPS_SapHandler(pPacket, macInstance);
+    mcPendingPackets++;
+
+
+    Serial_Print(interfaceId, "Sent counter: ", gAllowToBlock_d);
+
+    TurnOffLeds();
+    switch(value){
+		case 0:
+			Led3On();
+			break;
+		case 1:
+			Led2On();
+			break;
+		case 2:
+			Led4On();
+			break;
+		case 3:
+			Led4On();
+			Led2On();
+			break;
+    }
+    Serial_PrintHex(interfaceId, &value, 1, gPrtHexNewLine_c);
 }
 
 /******************************************************************************

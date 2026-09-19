@@ -63,6 +63,13 @@
 /* PAN ID of our coordinator */
 #define mDefaultValueOfPanId_c            0x1111
 
+/* Event for the time*/
+#define gAppEvtCounterTimer_c          (1 << 5)
+
+/* Counter sent to the coordinator */
+#define mCounterIntervalMs_c           3000   /* increment every 4 s */
+#define mCounterMaxValue_c             3      /* counts 0..3 */
+
 /************************************************************************************
 *************************************************************************************
 * Public type definitions
