@@ -37,6 +37,9 @@
 #include "board.h"
 #include "fsl_os_abstraction.h"
 
+/* My libs */
+#include "MyNewTask.h"
+
 /************************************************************************************
 *************************************************************************************
 * Private macros
@@ -86,7 +89,7 @@ extern void Mac_SetExtendedAddress(uint8_t *pAddr, instanceId_t instanceId);
 ************************************************************************************/
 /* The short address and PAN ID of the coordinator*/
 static const uint16_t mShortAddress = mDefaultValueOfShortAddress_c;
-static const uint16_t mPanId = mDefaultValueOfPanId_c;
+static const uint16_t mPanId = mDefaultValueOfPanId_c; // Adjust PANId
 
 /* The current logical channel (frequency band) */
 static uint8_t mLogicalChannel;
@@ -147,7 +150,7 @@ uint8_t gState;
 void main_task(uint32_t param)
 {
     static uint8_t initialized = FALSE;
-    
+    MyTask_Init();
     if( !initialized )
     {
         initialized = TRUE;
@@ -272,15 +275,11 @@ void AppThread(uint32_t argument)
           break;
           
       case stateScanEdStart:
-          /* Start the Energy Detection scan, and goto wait for confirm state. */
-          Serial_Print(interfaceId,"Initiating the Energy Detection Scan\n\r", gAllowToBlock_d);
-
-          ret = App_StartScan(gScanModeED_c, 0);
-          if(ret == errorNoError)
-          {
-              gState = stateScanEdWaitConfirm;
-          }
-          break;
+    	  /* ED scan skipped: use a fixed channel and go straight to starting the coordinator */
+    	  mLogicalChannel = 20;
+    	  gState = stateStartCoordinator;
+    	  OSA_EventSet(mAppEvent, gAppEvtStartCoordinator_c);
+    	  break;
           
       case stateScanEdWaitConfirm:
           /* Stay in this state until the MLME Scan confirm message arrives,
@@ -318,6 +317,7 @@ void AppThread(uint32_t argument)
                   /* If the Start request was sent successfully to
                   the MLME, then goto Wait for confirm state. */
                   gState = stateStartCoordinatorWaitConfirm;
+				  MyTaskTimer_Start(); /*Start LED flashing with your task*/
               }
           }
           break; 
@@ -332,6 +332,7 @@ void AppThread(uint32_t argument)
                   ret = App_WaitMsg(pMsgIn, gMlmeStartCnf_c);
                   if(ret == errorNoError)
                   {
+                	  MyTaskTimer_Stop();
                       Serial_Print(interfaceId,"Started the coordinator with PAN ID 0x", gAllowToBlock_d);
                       Serial_PrintHex(interfaceId,(uint8_t *)&mPanId, 2, gPrtHexNoFormat_c);
                       Serial_Print(interfaceId,", and short address 0x", gAllowToBlock_d);
@@ -512,79 +513,79 @@ static uint8_t App_StartScan(macScanType_t scanType, uint8_t appInstance)
 *
 ******************************************************************************/
 static void App_HandleScanEdConfirm(nwkMessage_t *pMsg)
-{  
-  uint8_t n, minEnergy;
-  uint8_t *pEdList;
-  uint32_t chMask = mDefaultValueOfChannel_c;
-  uint8_t idx;
-#ifndef gPHY_802_15_4g_d
-  uint8_t Channel;
-#endif
+{
+//  uint8_t n, minEnergy;
+//  uint8_t *pEdList;
+//  uint32_t chMask = mDefaultValueOfChannel_c;
+//  uint8_t idx;
+//#ifndef gPHY_802_15_4g_d
+//  uint8_t Channel;
+//#endif
+//
+//  Serial_Print(interfaceId,"Received the MLME-Scan Confirm message from the MAC\n\r", gAllowToBlock_d);
+//
+//  /* Get a pointer to the energy detect results */
+//  pEdList = pMsg->msgData.scanCnf.resList.pEnergyDetectList;
+//
+//  /* Set the minimum energy to a large value */
+//  minEnergy = 0xFF;
 
-  Serial_Print(interfaceId,"Received the MLME-Scan Confirm message from the MAC\n\r", gAllowToBlock_d);
-    
-  /* Get a pointer to the energy detect results */
-  pEdList = pMsg->msgData.scanCnf.resList.pEnergyDetectList;
-
-  /* Set the minimum energy to a large value */
-  minEnergy = 0xFF;
-
-#ifdef gPHY_802_15_4g_d
-      /* Select default channel */
-      mLogicalChannel = 0;
-      
-      /* Search for the channel with least energy */
-      for(idx=0, n=0; n<mDefaultMaxChannel_c; n++)
-      {
-          if( (chMask & (1 << n)) )
-          {
-              if( pEdList[idx] < minEnergy )
-              {
-                  minEnergy = pEdList[idx];
-                  mLogicalChannel = n;
-              }
-              idx++;
-          }
-      }      
-#else      
+//#ifdef gPHY_802_15_4g_d
+//      /* Select default channel */
+//      mLogicalChannel = 0;
+//
+//      /* Search for the channel with least energy */
+//      for(idx=0, n=0; n<mDefaultMaxChannel_c; n++)
+//      {
+//          if( (chMask & (1 << n)) )
+//          {
+//              if( pEdList[idx] < minEnergy )
+//              {
+//                  minEnergy = pEdList[idx];
+//                  mLogicalChannel = n;
+//              }
+//              idx++;
+//          }
+//      }
+//#else
   /* Select default channel */
-  mLogicalChannel = 11;
-  
+  //mLogicalChannel = 20;
+
   /* Search for the channel with least energy */
-  for(idx=0, n=0; n<16; n++)
-  {
-      /* Channel numbering is 11 to 26 both inclusive */
-      Channel = n + 11;
-      if( (chMask & (1 << Channel)) )
-      {
-          if( pEdList[idx] < minEnergy )
-          {
-              minEnergy = pEdList[idx];
-              mLogicalChannel = Channel;
-          }
-          idx++;
-      }
-  }
-#endif /* gPHY_802_15_4g_d */     
-
-  chMask &= ~(1 << mLogicalChannel);
-  
-  /* Print out the result of the ED scan */
-  Serial_Print(interfaceId,"ED scan returned the following results:\n\r  [", gAllowToBlock_d);
-#ifdef gPHY_802_15_4g_d
-  Serial_PrintHex(interfaceId,pEdList, mDefaultMaxChannel_c, gPrtHexBigEndian_c | gPrtHexSpaces_c);
-#else  
-  Serial_PrintHex(interfaceId,pEdList, 16, gPrtHexBigEndian_c | gPrtHexSpaces_c);
-#endif /* gPHY_802_15_4g_d */
-  Serial_Print(interfaceId,"]\n\r\n\r", gAllowToBlock_d);
-  
-  /* Print out the selected logical channel */
-  Serial_Print(interfaceId,"Based on the ED scan the logical channel 0x", gAllowToBlock_d);
-  Serial_PrintHex(interfaceId,&mLogicalChannel, 1, gPrtHexNoFormat_c);
-  Serial_Print(interfaceId," was selected\n\r", gAllowToBlock_d);
-
-  /* The list of detected energies must be freed. */
-  MSG_Free(pEdList);
+//  for(idx=0, n=0; n<16; n++)
+//  {
+//      /* Channel numbering is 11 to 26 both inclusive */
+//      Channel = n + 11;
+//      if( (chMask & (1 << Channel)) )
+//      {
+//          if( pEdList[idx] < minEnergy )
+//          {
+//              minEnergy = pEdList[idx];
+//              mLogicalChannel = Channel;
+//          }
+//          idx++;
+//      }
+//  }
+//#endif /* gPHY_802_15_4g_d */
+//
+//  chMask &= ~(1 << mLogicalChannel);
+//
+//  /* Print out the result of the ED scan */
+//  Serial_Print(interfaceId,"ED scan returned the following results:\n\r  [", gAllowToBlock_d);
+//#ifdef gPHY_802_15_4g_d
+//  Serial_PrintHex(interfaceId,pEdList, mDefaultMaxChannel_c, gPrtHexBigEndian_c | gPrtHexSpaces_c);
+//#else
+//  Serial_PrintHex(interfaceId,pEdList, 16, gPrtHexBigEndian_c | gPrtHexSpaces_c);
+//#endif /* gPHY_802_15_4g_d */
+//  Serial_Print(interfaceId,"]\n\r\n\r", gAllowToBlock_d);
+//
+//  /* Print out the selected logical channel */
+//  Serial_Print(interfaceId,"Based on the ED scan the logical channel 0x", gAllowToBlock_d);
+//  Serial_PrintHex(interfaceId,&mLogicalChannel, 1, gPrtHexNoFormat_c);
+//  Serial_Print(interfaceId," was selected\n\r", gAllowToBlock_d);
+//
+//  /* The list of detected energies must be freed. */
+//  MSG_Free(pEdList);
 }
 
 /******************************************************************************

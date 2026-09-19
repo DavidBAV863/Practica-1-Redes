@@ -780,7 +780,8 @@ static uint8_t App_HandleScanActiveConfirm(nwkMessage_t *pMsg)
         /* Only attempt to associate if the coordinator
            accepts associations and is non-beacon. */
         if( ( pPanDesc->superframeSpec.associationPermit ) && 
-            ( pPanDesc->superframeSpec.beaconOrder == 0x0F) )
+            ( pPanDesc->superframeSpec.beaconOrder == 0x0F) &&
+		    ( pPanDesc->coordPanId == mDefaultValueOfPanId_c ) )   /* only our PAN */
         {        
           
           /* Find the nearest coordinator using the link quality measure. */
