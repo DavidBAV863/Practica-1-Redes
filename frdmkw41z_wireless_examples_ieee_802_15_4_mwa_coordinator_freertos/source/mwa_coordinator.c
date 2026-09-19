@@ -99,6 +99,9 @@ static uint8_t mLogicalChannel;
 static uint16_t mDeviceShortAddress = 0xFFFF;
 static uint64_t mDeviceLongAddress = 0xFFFFFFFFFFFFFFFF;
 
+/* Next short address to hand out to a newly associating device (0xFFFE/0xFFFF are reserved) */
+static uint16_t mNextShortAddress = 0x0001;
+
 /* Data request packet for sending UART input to the coordinator */
 static nwkToMcpsMessage_t *mpPacket;
 
@@ -723,15 +726,19 @@ static uint8_t App_SendAssociateResponse(nwkMessage_t *pMsgIn, uint8_t appInstan
     /* Create the Associate response message data. */
     pAssocRes = &pMsg->msgData.associateRes;
 
-    /* Assign a short address to the device. In this example we simply
-       choose 0x0001. Though, all devices and coordinators in a PAN must have
-       different short addresses. However, if a device do not want to use
-       short addresses at all in the PAN, a short address of 0xFFFE must
-       be assigned to it. */
+    /* Assign a short address to the device. Each associating device gets the
+       next available address, since all devices and coordinators in a PAN
+       must have different short addresses. However, if a device does not
+       want to use short addresses at all in the PAN, a short address of
+       0xFFFE must be assigned to it. */
     if(pMsgIn->msgData.associateInd.capabilityInfo & gCapInfoAllocAddr_c)
     {
-      /* Assign a unique short address less than 0xfffe if the device requests so. */
-      pAssocRes->assocShortAddress = 0x0001;
+      /* Hand out the next free short address, then advance the counter. */
+      pAssocRes->assocShortAddress = mNextShortAddress++;
+      if( mNextShortAddress >= 0xFFFE )
+      {
+          mNextShortAddress = 0x0001; /* wrap around (0xFFFE/0xFFFF are reserved) */
+      }
     }
     else
     {
@@ -844,6 +851,15 @@ static void App_HandleMcpsInput(mcpsToNwkMessage_t *pMsgIn, uint8_t appInstance)
 //        Serial_Print(interfaceId, "\r\n[Coordinator] Extracted counter digit: '", gAllowToBlock_d);
 //        Serial_SyncWrite(interfaceId, &counterChar, 1);
 //        Serial_Print(interfaceId, "'\r\n", gAllowToBlock_d);
+
+        /* Print who sent the counter: short address, LQI, and payload size */
+        Serial_Print(interfaceId, "\r\n[Coordinator] Sender short address: 0x", gAllowToBlock_d);
+        Serial_PrintHex(interfaceId, (uint8_t *)&pMsgIn->msgData.dataInd.srcAddr, 2, gPrtHexNoFormat_c);
+        Serial_Print(interfaceId, ", LQI: ", gAllowToBlock_d);
+        Serial_PrintDec(interfaceId, pMsgIn->msgData.dataInd.mpduLinkQuality);
+        Serial_Print(interfaceId, ", Payload size: ", gAllowToBlock_d);
+        Serial_PrintDec(interfaceId, pMsgIn->msgData.dataInd.msduLength);
+        Serial_Print(interfaceId, " bytes\r\n", gAllowToBlock_d);
 
         if( counterChar != 0 )
         {
