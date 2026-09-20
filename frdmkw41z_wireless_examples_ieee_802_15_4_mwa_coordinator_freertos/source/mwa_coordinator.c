@@ -53,6 +53,28 @@
 
 /************************************************************************************
 *************************************************************************************
+* Private type definitions
+*************************************************************************************
+************************************************************************************/
+#define gMaxAssociatedDevices_c 5
+
+typedef enum deviceType_tag
+{
+  gDeviceTypeRfd_c = 0, /* Reduced Function Device */
+  gDeviceTypeFfd_c = 1  /* Full Function Device */
+} deviceType_t;
+
+typedef struct associatedDevice_tag
+{
+  bool_t       isUsed;
+  uint16_t     shortAddress;
+  uint64_t     extendedAddress;
+  bool_t       rxOnWhenIdle;
+  deviceType_t deviceType;
+} associatedDevice_t;
+
+/************************************************************************************
+*************************************************************************************
 * Private prototypes
 *************************************************************************************
 ************************************************************************************/
@@ -64,6 +86,8 @@ static void    App_HandleScanEdConfirm(nwkMessage_t *pMsg);
 static uint8_t App_StartCoordinator( uint8_t appInstance );
 static uint8_t App_HandleMlmeInput(nwkMessage_t *pMsg, uint8_t appInstance);
 static uint8_t App_SendAssociateResponse(nwkMessage_t *pMsgIn, uint8_t appInstance);
+static associatedDevice_t *App_FindAssociatedDeviceByExtAddr(uint64_t extendedAddress);
+static associatedDevice_t *App_GetFreeDeviceSlot(void);
 static void    App_HandleMcpsInput(mcpsToNwkMessage_t *pMsgIn, uint8_t appInstance);
 static void    App_TransmitUartData(void);
 static uint8_t App_WaitMsg(nwkMessage_t *pMsg, uint8_t msgType);
@@ -74,13 +98,6 @@ void AppThread (uint32_t argument);
 resultType_t MLME_NWK_SapHandler (nwkMessage_t* pMsg, instanceId_t instanceId);
 resultType_t MCPS_NWK_SapHandler (mcpsToNwkMessage_t* pMsg, instanceId_t instanceId);
 extern void Mac_SetExtendedAddress(uint8_t *pAddr, instanceId_t instanceId);
-
-/************************************************************************************
-*************************************************************************************
-* Private type definitions
-*************************************************************************************
-************************************************************************************/
-
 
 /************************************************************************************
 *************************************************************************************
@@ -101,6 +118,9 @@ static uint64_t mDeviceLongAddress = 0xFFFFFFFFFFFFFFFF;
 
 /* Next short address to hand out to a newly associating device (0xFFFE/0xFFFF are reserved) */
 static uint16_t mNextShortAddress = 0x0001;
+
+/* Table of up to gMaxAssociatedDevices_c devices that have associated to this PAN */
+static associatedDevice_t maAssociatedDevices[gMaxAssociatedDevices_c];
 
 /* Data request packet for sending UART input to the coordinator */
 static nwkToMcpsMessage_t *mpPacket;
@@ -695,6 +715,44 @@ static uint8_t App_StartCoordinator( uint8_t appInstance )
 
 
 /******************************************************************************
+* The App_FindAssociatedDeviceByExtAddr(extendedAddress) function searches the
+* associated-devices struct for a device with the given extended address.
+*
+* Returns a pointer to the matching entry, or NULL if not found.
+******************************************************************************/
+static associatedDevice_t *App_FindAssociatedDeviceByExtAddr(uint64_t extendedAddress)
+{
+  uint8_t i;
+
+  for(i = 0; i < gMaxAssociatedDevices_c; i++)
+  {
+    if(maAssociatedDevices[i].isUsed && (maAssociatedDevices[i].extendedAddress == extendedAddress))
+    {
+      return &maAssociatedDevices[i];
+    }
+  }
+  return NULL;
+}
+
+/******************************************************************************
+* The App_GetFreeDeviceSlot() function returns a pointer to the first unused
+* slot in the associated-devices struct, or NULL if the struct is full.
+******************************************************************************/
+static associatedDevice_t *App_GetFreeDeviceSlot(void)
+{
+  uint8_t i;
+
+  for(i = 0; i < gMaxAssociatedDevices_c; i++)
+  {
+    if(!maAssociatedDevices[i].isUsed)
+    {
+      return &maAssociatedDevices[i];
+    }
+  }
+  return NULL;
+}
+
+/******************************************************************************
 * The App_SendAssociateResponse(nwkMessage_t *pMsgIn) will create the response
 * message to an Associate Indication (device sends an Associate Request to its
 * MAC. The request is transmitted to the coordinator where it is converted into
@@ -713,7 +771,13 @@ static uint8_t App_SendAssociateResponse(nwkMessage_t *pMsgIn, uint8_t appInstan
 {
   mlmeMessage_t *pMsg;
   mlmeAssociateRes_t *pAssocRes;
- 
+  uint64_t requestingExtAddr;
+  associatedDevice_t *pDevice;
+
+  FLib_MemCpy(&requestingExtAddr, &pMsgIn->msgData.associateInd.deviceAddress, 8);
+  /* Was this extended address associated to us before, reuse its short address. */
+  pDevice = App_FindAssociatedDeviceByExtAddr(requestingExtAddr);
+
   Serial_Print(interfaceId,"Sending the MLME-Associate Response message to the MAC...", gAllowToBlock_d);
  
   /* Allocate a message for the MLME */
@@ -726,18 +790,25 @@ static uint8_t App_SendAssociateResponse(nwkMessage_t *pMsgIn, uint8_t appInstan
     /* Create the Associate response message data. */
     pAssocRes = &pMsg->msgData.associateRes;
 
-    /* Assign a short address to the device. Each associating device gets the
-       next available address, since all devices and coordinators in a PAN
-       must have different short addresses. However, if a device does not
-       want to use short addresses at all in the PAN, a short address of
-       0xFFFE must be assigned to it. */
+    /* Assign a short address to the device. A device that already associated
+       before (matched by extended address) keeps its previous short address.
+       A new device gets the next available address, since all devices and
+       coordinators in a PAN must have different short addresses. */
     if(pMsgIn->msgData.associateInd.capabilityInfo & gCapInfoAllocAddr_c)
     {
-      /* Hand out the next free short address, then advance the counter. */
-      pAssocRes->assocShortAddress = mNextShortAddress++;
-      if( mNextShortAddress >= 0xFFFE )
+      if(pDevice != NULL)
       {
-          mNextShortAddress = 0x0001; /* wrap around (0xFFFE/0xFFFF are reserved) */
+        /* Known device: keep the short address it was already assigned. */
+        pAssocRes->assocShortAddress = pDevice->shortAddress;
+      }
+      else
+      {
+        /* New device: hand out the next free short address. */
+        pAssocRes->assocShortAddress = mNextShortAddress++;
+        if( mNextShortAddress >= 0xFFFE )
+        {
+            mNextShortAddress = 0x0001; /* wrap around (0xFFFE/0xFFFF are reserved) */
+        }
       }
     }
     else
@@ -752,6 +823,35 @@ static uint8_t App_SendAssociateResponse(nwkMessage_t *pMsgIn, uint8_t appInstan
     pAssocRes->status = gSuccess_c;
     /* Do not use security */
     pAssocRes->securityLevel = gMacSecurityNone_c;
+
+    /* Store (or update) device's info in the associated-devices struct. */
+    if(pDevice == NULL)
+    {
+      pDevice = App_GetFreeDeviceSlot();
+    }
+    if(pDevice != NULL)
+    {
+      pDevice->isUsed          = TRUE;
+      pDevice->shortAddress    = pAssocRes->assocShortAddress;
+      pDevice->extendedAddress = requestingExtAddr;
+      pDevice->rxOnWhenIdle    = (pMsgIn->msgData.associateInd.capabilityInfo & gCapInfoRxWhenIdle_c) ? TRUE : FALSE;
+      pDevice->deviceType      = (pMsgIn->msgData.associateInd.capabilityInfo & gCapInfoDeviceFfd_c) ? gDeviceTypeFfd_c : gDeviceTypeRfd_c;
+
+      /* Print the stored node info */
+      Serial_Print(interfaceId, "\r\n[Coordinator] Node joined - Short Address: 0x", gAllowToBlock_d);
+      Serial_PrintHex(interfaceId, (uint8_t *)&pDevice->shortAddress, 2, gPrtHexNoFormat_c);
+      Serial_Print(interfaceId, ", Extended Address: 0x", gAllowToBlock_d);
+      Serial_PrintHex(interfaceId, (uint8_t *)&pDevice->extendedAddress, 8, gPrtHexNoFormat_c);
+      Serial_Print(interfaceId, ", RxOnWhenIdle: ", gAllowToBlock_d);
+      Serial_Print(interfaceId, pDevice->rxOnWhenIdle ? "TRUE" : "FALSE", gAllowToBlock_d);
+      Serial_Print(interfaceId, ", DeviceType: ", gAllowToBlock_d);
+      Serial_Print(interfaceId, (pDevice->deviceType == gDeviceTypeFfd_c) ? "FFD" : "RFD", gAllowToBlock_d);
+      Serial_Print(interfaceId, "\r\n", gAllowToBlock_d);
+    }
+    else
+    {
+      Serial_Print(interfaceId, "\r\nWarning: associated-devices table is full, device info was not stored!\r\n", gAllowToBlock_d);
+    }
 
     /* Save device info. */
     FLib_MemCpy(&mDeviceShortAddress, &pAssocRes->assocShortAddress, 2);
