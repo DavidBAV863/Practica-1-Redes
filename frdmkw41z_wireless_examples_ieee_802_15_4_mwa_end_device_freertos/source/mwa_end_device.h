@@ -25,7 +25,8 @@
 *************************************************************************************
 ************************************************************************************/
 
-#define mMacExtendedAddress_c      (0xFFFFFFFFFFFFFFFF)
+#define mMacExtendedAddress_c      (0x0000000000000004)
+									//0x0000000000000001
 
 #ifndef gNvmTestActive_d
 #define gNvmTestActive_d           (0)
