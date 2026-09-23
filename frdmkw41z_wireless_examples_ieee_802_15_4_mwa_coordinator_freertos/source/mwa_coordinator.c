@@ -218,6 +218,9 @@ void App_init( void )
     /* Reset number of pending packets */
     mcPendingPackets = 0;
     
+    /* Clean associated devices table */
+    FLib_MemSet(maAssociatedDevices, 0, sizeof(maAssociatedDevices));
+
     /* Prepare input queues.*/
     MSG_InitQueue(&mMlmeNwkInputQueue); 
     MSG_InitQueue(&mMcpsNwkInputQueue);
@@ -726,7 +729,7 @@ static associatedDevice_t *App_FindAssociatedDeviceByExtAddr(uint64_t extendedAd
 
   for(i = 0; i < gMaxAssociatedDevices_c; i++)
   {
-    if(maAssociatedDevices[i].isUsed && (maAssociatedDevices[i].extendedAddress == extendedAddress))
+    if(maAssociatedDevices[i].extendedAddress == extendedAddress)
     {
       return &maAssociatedDevices[i];
     }
@@ -902,13 +905,38 @@ static uint8_t App_HandleMlmeInput(nwkMessage_t *pMsg, uint8_t appInstance)
     /* Sent by the MLME after the Association Response has been transmitted. */
     Serial_Print(interfaceId,"Received an MLME-Comm-Status Indication from the MAC\n\r", gAllowToBlock_d);
     break;
+
+  /* ===== Desasosiacion ===== */
+  case gMlmeDisassociateInd_c:
+  {
+    uint64_t deviceExtAddr;
+    associatedDevice_t *pDevice;
+
+    FLib_MemCpy(&deviceExtAddr, &pMsg->msgData.disassociateInd.deviceAddress, 8);
+    pDevice = App_FindAssociatedDeviceByExtAddr(deviceExtAddr);
+
+    if(pDevice != NULL)
+    {
+      pDevice->isUsed = FALSE;   /* slot liberation */
+
+      Serial_Print(interfaceId, "\r\n[Coordinator] Device left - Short Address: 0x", gAllowToBlock_d);
+      Serial_PrintHex(interfaceId, (uint8_t *)&pDevice->shortAddress, 2, gPrtHexNoFormat_c);
+      Serial_Print(interfaceId, ", Extended Address: 0x", gAllowToBlock_d);
+      Serial_PrintHex(interfaceId, (uint8_t *)&pDevice->extendedAddress, 8, gPrtHexNoFormat_c);
+      Serial_Print(interfaceId, " (slot freed)\r\n", gAllowToBlock_d);
+    }
+    else
+    {
+      Serial_Print(interfaceId, "\r\n[Coordinator] Disassociate from unknown device\r\n", gAllowToBlock_d);
+    }
+    break;
+  }
     
   default:
     break;
   }
   return errorNoError;
 }
-
 /******************************************************************************
 * The App_HandleMcpsInput(mcpsToNwkMessage_t *pMsgIn) function will handle
 * messages from the MCPS, e.g. Data Confirm, and Data Indication.
