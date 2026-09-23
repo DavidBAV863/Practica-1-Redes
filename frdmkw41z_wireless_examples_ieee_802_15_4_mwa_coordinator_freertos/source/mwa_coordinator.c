@@ -57,6 +57,9 @@
 *************************************************************************************
 ************************************************************************************/
 #define gMaxAssociatedDevices_c 5
+#define mDeviceInactivityTimeout_c   5
+static tmrTimerID_t mInactivityTimer = gTmrInvalidTimerID_c;
+static uint32_t     mSystemSeconds = 0;   /* contador de segundos del sistema */
 
 typedef enum deviceType_tag
 {
@@ -71,6 +74,7 @@ typedef struct associatedDevice_tag
   uint64_t     extendedAddress;
   bool_t       rxOnWhenIdle;
   deviceType_t deviceType;
+  uint32_t     lastSeen;
 } associatedDevice_t;
 
 /************************************************************************************
@@ -88,6 +92,10 @@ static uint8_t App_HandleMlmeInput(nwkMessage_t *pMsg, uint8_t appInstance);
 static uint8_t App_SendAssociateResponse(nwkMessage_t *pMsgIn, uint8_t appInstance);
 static associatedDevice_t *App_FindAssociatedDeviceByExtAddr(uint64_t extendedAddress);
 static associatedDevice_t *App_GetFreeDeviceSlot(void);
+static void App_UpdateDeviceLastSeen(uint16_t shortAddr);
+static void App_CheckInactivity(void);
+static void App_InactivityTimerCallback(void *param);
+
 static void    App_HandleMcpsInput(mcpsToNwkMessage_t *pMsgIn, uint8_t appInstance);
 static void    App_TransmitUartData(void);
 static uint8_t App_WaitMsg(nwkMessage_t *pMsg, uint8_t msgType);
@@ -220,6 +228,13 @@ void App_init( void )
     
     /* Clean associated devices table */
     FLib_MemSet(maAssociatedDevices, 0, sizeof(maAssociatedDevices));
+
+    /* Timer de inactividad (1 segundo) */
+    mInactivityTimer = TMR_AllocateTimer();
+    if(mInactivityTimer != gTmrInvalidTimerID_c)
+    {
+      TMR_StartIntervalTimer(mInactivityTimer, 1000, App_InactivityTimerCallback, NULL);
+    }
 
     /* Prepare input queues.*/
     MSG_InitQueue(&mMlmeNwkInputQueue); 
@@ -797,27 +812,51 @@ static uint8_t App_SendAssociateResponse(nwkMessage_t *pMsgIn, uint8_t appInstan
        before (matched by extended address) keeps its previous short address.
        A new device gets the next available address, since all devices and
        coordinators in a PAN must have different short addresses. */
+    /* Assign a short address to the device. */
     if(pMsgIn->msgData.associateInd.capabilityInfo & gCapInfoAllocAddr_c)
     {
       if(pDevice != NULL)
       {
-        /* Known device: keep the short address it was already assigned. */
         pAssocRes->assocShortAddress = pDevice->shortAddress;
       }
       else
       {
-        /* New device: hand out the next free short address. */
-        pAssocRes->assocShortAddress = mNextShortAddress++;
-        if( mNextShortAddress >= 0xFFFE )
+        uint16_t candidate = 0x0001;
+        bool_t found = FALSE;
+
+        while(candidate < 0xFFFE)
         {
-            mNextShortAddress = 0x0001; /* wrap around (0xFFFE/0xFFFF are reserved) */
+          bool_t used = FALSE;
+          uint8_t j;
+
+          for(j = 0; j < gMaxAssociatedDevices_c; j++)
+          {
+            if(maAssociatedDevices[j].shortAddress == candidate)
+            {
+              used = TRUE;
+              break;
+            }
+          }
+
+          if(!used)
+          {
+            pAssocRes->assocShortAddress = candidate;
+            found = TRUE;
+            break;
+          }
+          candidate++;
+        }
+
+        if(!found)
+        {
+          /* No debería pasar con solo 5 dispositivos, pero por seguridad */
+          pAssocRes->assocShortAddress = mNextShortAddress++;
+          if(mNextShortAddress >= 0xFFFE) mNextShortAddress = 0x0001;
         }
       }
     }
     else
     {
-      /* A short address of 0xfffe means that the device is granted access to
-         the PAN (Associate successful) but that long addressing is used.*/
       pAssocRes->assocShortAddress = 0xFFFE;
     }
     /* Get the 64 bit address of the device requesting association. */
@@ -832,14 +871,16 @@ static uint8_t App_SendAssociateResponse(nwkMessage_t *pMsgIn, uint8_t appInstan
     {
       pDevice = App_GetFreeDeviceSlot();
     }
+
     if(pDevice != NULL)
     {
+      /* Hay slot libre o es un dispositivo ya conocido → aceptamos */
       pDevice->isUsed          = TRUE;
       pDevice->shortAddress    = pAssocRes->assocShortAddress;
       pDevice->extendedAddress = requestingExtAddr;
       pDevice->rxOnWhenIdle    = (pMsgIn->msgData.associateInd.capabilityInfo & gCapInfoRxWhenIdle_c) ? TRUE : FALSE;
       pDevice->deviceType      = (pMsgIn->msgData.associateInd.capabilityInfo & gCapInfoDeviceFfd_c) ? gDeviceTypeFfd_c : gDeviceTypeRfd_c;
-
+      pDevice->lastSeen = mSystemSeconds;
       /* Print the stored node info */
       Serial_Print(interfaceId, "\r\n[Coordinator] Node joined - Short Address: 0x", gAllowToBlock_d);
       Serial_PrintHex(interfaceId, (uint8_t *)&pDevice->shortAddress, 2, gPrtHexNoFormat_c);
@@ -853,7 +894,10 @@ static uint8_t App_SendAssociateResponse(nwkMessage_t *pMsgIn, uint8_t appInstan
     }
     else
     {
-      Serial_Print(interfaceId, "\r\nWarning: associated-devices table is full, device info was not stored!\r\n", gAllowToBlock_d);
+      /* Tabla llena y es un dispositivo nuevo → rechazamos la asociación */
+      pAssocRes->status = gPanAtCapacity_c;   /* o gPanAccessDenied_c */
+
+      Serial_Print(interfaceId, "\r\n[Coordinator] Association REJECTED - table full (max 5 devices)\r\n", gAllowToBlock_d);
     }
 
     /* Save device info. */
@@ -880,7 +924,45 @@ static uint8_t App_SendAssociateResponse(nwkMessage_t *pMsgIn, uint8_t appInstan
     return errorAllocFailed;
   }
 }
+static void App_UpdateDeviceLastSeen(uint16_t shortAddr)
+{
+  uint8_t i;
 
+  for(i = 0; i < gMaxAssociatedDevices_c; i++)
+  {
+    if(maAssociatedDevices[i].isUsed && maAssociatedDevices[i].shortAddress == shortAddr)
+    {
+      maAssociatedDevices[i].lastSeen = mSystemSeconds;
+      break;
+    }
+  }
+}
+static void App_CheckInactivity(void)
+{
+  uint8_t i;
+
+  for(i = 0; i < gMaxAssociatedDevices_c; i++)
+  {
+    if(maAssociatedDevices[i].isUsed)
+    {
+      /* Si han pasado más de mDeviceInactivityTimeout_c segundos sin recibir nada */
+      if( (mSystemSeconds - maAssociatedDevices[i].lastSeen) >= mDeviceInactivityTimeout_c )
+      {
+        maAssociatedDevices[i].isUsed = FALSE;
+
+        Serial_Print(interfaceId, "\r\n[Coordinator] Device timed out - Short Address: 0x", gAllowToBlock_d);
+        Serial_PrintHex(interfaceId, (uint8_t *)&maAssociatedDevices[i].shortAddress, 2, gPrtHexNoFormat_c);
+        Serial_Print(interfaceId, " (slot freed by inactivity)\r\n", gAllowToBlock_d);
+      }
+    }
+  }
+}
+static void App_InactivityTimerCallback(void *param)
+{
+  (void)param;
+  mSystemSeconds++;               /* avanza el reloj de segundos */
+  App_CheckInactivity();          /* revisa si alguien se fue */
+}
 /******************************************************************************
 * The App_HandleMlmeInput(nwkMessage_t *pMsg) function will handle various
 * messages from the MLME, e.g. (Dis)Associate Indication.
@@ -954,6 +1036,8 @@ static void App_HandleMcpsInput(mcpsToNwkMessage_t *pMsgIn, uint8_t appInstance)
     break;
 
   case gMcpsDataInd_c:
+	/* Actualizar lastSeen del dispositivo que acaba de enviar */
+	App_UpdateDeviceLastSeen(pMsgIn->msgData.dataInd.srcAddr);
     /* The MCPS-Data indication is sent by the MAC to the network
        or application layer when data has been received. We simply
        copy the received data to the UART. */
